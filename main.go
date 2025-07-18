@@ -53,9 +53,11 @@ func main() {
 
 	pr := processor.NewProcessor(defaultUrl, fallbackUrl)
 
-	rdb := broker.NewBrokerPool(redisUri, "admin", db, pr)
+	consumerGroupName := readEnv("CONSUMER_GROUP_NAME", "rinha2025")
 
-	rdb.StartListener2(ctx, &wg)
+	rdb := broker.NewBrokerPool(redisUri, "admin", db, pr, consumerGroupName)
+
+	rdb.StartListener(ctx, &wg)
 
 	handler := &handler.AppHandler{Broker: rdb, Db: db}
 
@@ -73,7 +75,8 @@ func main() {
 	}
 
 	go func() {
-		log.Println("HTTP server running on :9999")
+		httpPort := readEnv("HTTP_PORT", "9999")
+		log.Printf("HTTP Server on port: %s", httpPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server error: %v", err)
 		}
@@ -92,7 +95,7 @@ func main() {
 	log.Println("DB connection closed")
 	rdb.Client.Close()
 	log.Println("Broker connection closed")
-	wg.Wait()
 	log.Println("Application shutdown complete")
+	wg.Wait()
 
 }

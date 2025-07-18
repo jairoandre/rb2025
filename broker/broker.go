@@ -20,16 +20,39 @@ type BrokerPool struct {
 	Suspend   bool
 	MaxTries  int
 	Timeout   time.Duration
+	GroupName string
 }
 
-func NewBrokerPool(addr string, pass string, db *postgres.DB, pr *processor.Processor) *BrokerPool {
+func NewBrokerPool(addr string, pass string, db *postgres.DB, pr *processor.Processor, groupName string) *BrokerPool {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         addr,
 		Password:     pass, // or set if needed
 		PoolSize:     30,
 		MinIdleConns: 10,
 	})
-	return &BrokerPool{Client: rdb, Db: db, Processor: pr, Suspend: false, MaxTries: 3, Timeout: 500 * time.Millisecond}
+	return &BrokerPool{
+		Client:    rdb,
+		Db:        db,
+		Processor: pr,
+		Suspend:   false,
+		MaxTries:  3,
+		Timeout:   500 * time.Millisecond,
+		GroupName: groupName,
+	}
+}
+
+func (r *BrokerPool) CreateGroup(stream string) {
+	ctx := context.Background()
+	err := r.Client.XGroupCreateMkStream(ctx, stream, r.GroupName, "$").Err()
+	if err != nil {
+		if err.Error() == "BUSYGROUP Consumer Group name already exists" {
+			log.Printf("Consumer group %s already exists on stream %s", r.GroupName, stream)
+		} else {
+			log.Fatalf("Failed to create consumer group: %v", err)
+		}
+	} else {
+		log.Printf("Consumer group %s created on stream %s", r.GroupName, stream)
+	}
 }
 
 func (r *BrokerPool) SendEvent(event map[string]any, streamName string) error {
@@ -46,7 +69,6 @@ func (r *BrokerPool) SendEvent(event map[string]any, streamName string) error {
 		}
 		lastErr = err
 		log.Printf("Broker enqueue failed (attempt %d/%d): %v", attempt, r.MaxTries, err)
-		time.Sleep(10 * time.Millisecond)
 	}
 	log.Printf("Broker enqueue permanently failed: %v", lastErr)
 	return lastErr
@@ -67,31 +89,10 @@ func (r *BrokerPool) CheckSuspend() {
 	r.Suspend = false
 }
 
-func (r *BrokerPool) ReadFromStream(ctx context.Context, streanName string, lastId string, msgHandler func(redis.XMessage)) (string, error) {
-	res, err := r.Client.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{streanName, lastId},
-		Count:   1,
-		Block:   0,
-	}).Result()
-	if err != nil {
-		log.Println("Broker read error:", err)
-		return "", err
-	}
-
-	messages := res[0].Messages
-
-	for _, msg := range messages {
-		go msgHandler(msg)
-		lastId = msg.ID
-	}
-	return lastId, nil
-
-}
-
 func (r *BrokerPool) ReadFromStreamJob(ctx context.Context, streanName string, lastId string, jobs chan<- redis.XMessage) (string, error) {
 	select {
 	case <-ctx.Done():
-		return "", nil
+		return lastId, nil
 	default:
 		// nothing
 	}
@@ -101,8 +102,7 @@ func (r *BrokerPool) ReadFromStreamJob(ctx context.Context, streanName string, l
 		Block:   0,
 	}).Result()
 	if err != nil {
-		log.Println("Broker read error:", err)
-		return "", err
+		return lastId, err
 	}
 
 	messages := res[0].Messages
@@ -127,38 +127,7 @@ func worker(ctx context.Context, jobs <-chan redis.XMessage, wg *sync.WaitGroup,
 	}
 }
 
-func (r *BrokerPool) StartListener1(ctx context.Context) {
-	go func() {
-		lastId := "$"
-		for {
-			if r.Suspend {
-				r.CheckSuspend()
-				continue
-			}
-			newLastId, err := r.ReadFromStream(ctx, "payments", lastId, r.ProcessEvent)
-			if err != nil {
-				continue
-			}
-			lastId = newLastId
-		}
-	}()
-	go func() {
-		lastId := "$"
-		for {
-			if r.Suspend {
-				continue
-			}
-			newLastId, err := r.ReadFromStream(ctx, "payments-finished", lastId, r.ProcessFinishedEvent)
-			if err != nil {
-				continue
-			}
-			lastId = newLastId
-		}
-
-	}()
-}
-
-func (r *BrokerPool) StartListener2(ctx context.Context, wg *sync.WaitGroup) {
+func (r *BrokerPool) StartListener(ctx context.Context, wg *sync.WaitGroup) {
 	const numWorkers = 100
 	jobs := make(chan redis.XMessage, 1000)
 	for range numWorkers {

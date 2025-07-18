@@ -25,7 +25,7 @@ func NewDB(host string, port int, user, password, dbname string) (*DB, error) {
 	}
 
 	// Optional: tune pool settings
-	db.SetMaxOpenConns(100)
+	db.SetMaxOpenConns(30)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(time.Hour)
 

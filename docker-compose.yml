@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: docker.io/library/postgres:13
+    image: docker.io/library/postgres:17-alpine
     container_name: postgres
     hostname: postgres
     environment:
@@ -13,9 +13,15 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/ddl.sql
     ports:
       - "5432:5432"
-  dragonflydb:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly
-    container_name: dragonflydb
-    restart: always
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis-db
+    command: redis-server --save "" --appendonly no --maxclients 1000
     ports:
       - "6379:6379"
+  #dragonflydb:
+  #  image: docker.dragonflydb.io/dragonflydb/dragonfly
+  #  container_name: dragonflydb
+  #  restart: always
+  #  ports:
+  #    - "6379:6379"
