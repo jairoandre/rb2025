@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: docker.io/library/postgres:13
+    container_name: postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: "root"
+      POSTGRES_PASSWORD: "root"
+      POSTGRES_DB: "rb2025"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/ddl.sql
+    ports:
+      - "5432:5432"
+  dragonflydb:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly
+    container_name: dragonflydb
+    restart: always
+    ports:
+      - "6379:6379"
