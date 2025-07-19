@@ -14,44 +14,52 @@ import (
 )
 
 type BrokerPool struct {
-	Client    *redis.Client
-	Db        *postgres.DB
-	Processor *processor.Processor
-	Suspend   bool
-	MaxTries  int
-	Timeout   time.Duration
-	GroupName string
+	Client       *redis.Client
+	Db           *postgres.DB
+	Processor    *processor.Processor
+	Suspend      bool
+	MaxTries     int
+	Timeout      time.Duration
+	ConsumerName string
 }
 
-func NewBrokerPool(addr string, pass string, db *postgres.DB, pr *processor.Processor, groupName string) *BrokerPool {
+const (
+	paymentsStream         = "payments"
+	paymentsFinishedStream = "payments-finished"
+)
+
+func NewBrokerPool(addr string, pass string, db *postgres.DB, pr *processor.Processor, consumerName string) *BrokerPool {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:         addr,
 		Password:     pass, // or set if needed
 		PoolSize:     30,
 		MinIdleConns: 10,
 	})
-	return &BrokerPool{
-		Client:    rdb,
-		Db:        db,
-		Processor: pr,
-		Suspend:   false,
-		MaxTries:  3,
-		Timeout:   500 * time.Millisecond,
-		GroupName: groupName,
+	broker := &BrokerPool{
+		Client:       rdb,
+		Db:           db,
+		Processor:    pr,
+		Suspend:      false,
+		MaxTries:     3,
+		Timeout:      500 * time.Millisecond,
+		ConsumerName: consumerName,
 	}
+	broker.CreateGroup(paymentsStream, paymentsStream)
+	broker.CreateGroup(paymentsFinishedStream, paymentsFinishedStream)
+	return broker
 }
 
-func (r *BrokerPool) CreateGroup(stream string) {
+func (r *BrokerPool) CreateGroup(stream string, groupName string) {
 	ctx := context.Background()
-	err := r.Client.XGroupCreateMkStream(ctx, stream, r.GroupName, "$").Err()
+	err := r.Client.XGroupCreateMkStream(ctx, stream, groupName, "$").Err()
 	if err != nil {
 		if err.Error() == "BUSYGROUP Consumer Group name already exists" {
-			log.Printf("Consumer group %s already exists on stream %s", r.GroupName, stream)
+			log.Printf("Consumer group %s already exists on stream %s", groupName, stream)
 		} else {
 			log.Fatalf("Failed to create consumer group: %v", err)
 		}
 	} else {
-		log.Printf("Consumer group %s created on stream %s", r.GroupName, stream)
+		log.Printf("Consumer group %s created on stream %s", groupName, stream)
 	}
 }
 
@@ -115,6 +123,39 @@ func (r *BrokerPool) ReadFromStreamJob(ctx context.Context, streanName string, l
 
 }
 
+func (r *BrokerPool) ReadFromStreamGroupJob(ctx context.Context, streamName string, groupName string, jobs chan<- redis.XMessage) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+		// nothing
+	}
+	res, err := r.Client.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group:    groupName,
+		Consumer: r.ConsumerName,
+		Streams:  []string{streamName, ">"},
+		Count:    10,
+		Block:    5 * time.Second,
+	}).Result()
+	if err != nil {
+		return err
+	}
+	for _, streamRes := range res {
+		for _, msg := range streamRes.Messages {
+			n, err := r.Client.XAck(ctx, streamName, groupName, msg.ID).Result()
+			if err != nil {
+				log.Printf("Error to ack message: %s, %v", msg.ID, err)
+			} else if n == 0 {
+				log.Printf("Message %s not acknowledge (not in PEL)", msg.ID)
+			} else {
+				jobs <- msg
+			}
+		}
+	}
+	return nil
+
+}
+
 func worker(ctx context.Context, jobs <-chan redis.XMessage, wg *sync.WaitGroup, msgHandler func(redis.XMessage)) {
 	defer wg.Done()
 	for event := range jobs {
@@ -135,7 +176,6 @@ func (r *BrokerPool) StartListener(ctx context.Context, wg *sync.WaitGroup) {
 		go worker(ctx, jobs, wg, r.ProcessEvent)
 	}
 	go func() {
-		lastId := "$"
 		for {
 			select {
 			case <-ctx.Done():
@@ -148,11 +188,10 @@ func (r *BrokerPool) StartListener(ctx context.Context, wg *sync.WaitGroup) {
 				r.CheckSuspend()
 				continue
 			}
-			newLastId, err := r.ReadFromStreamJob(ctx, "payments", lastId, jobs)
+			err := r.ReadFromStreamGroupJob(ctx, paymentsStream, paymentsStream, jobs)
 			if err != nil {
 				continue
 			}
-			lastId = newLastId
 		}
 	}()
 	finishedPaymentsJobs := make(chan redis.XMessage, 1000)
@@ -161,7 +200,6 @@ func (r *BrokerPool) StartListener(ctx context.Context, wg *sync.WaitGroup) {
 		go worker(ctx, finishedPaymentsJobs, wg, r.ProcessFinishedEvent)
 	}
 	go func() {
-		lastId := "$"
 		for {
 			select {
 			case <-ctx.Done():
@@ -173,13 +211,11 @@ func (r *BrokerPool) StartListener(ctx context.Context, wg *sync.WaitGroup) {
 			if r.Suspend {
 				continue
 			}
-			newLastId, err := r.ReadFromStreamJob(ctx, "payments-finished", lastId, finishedPaymentsJobs)
+			err := r.ReadFromStreamGroupJob(ctx, paymentsFinishedStream, paymentsFinishedStream, finishedPaymentsJobs)
 			if err != nil {
 				continue
 			}
-			lastId = newLastId
 		}
-
 	}()
 }
 

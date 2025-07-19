@@ -6,8 +6,8 @@ services:
     container_name: postgres
     hostname: postgres
     environment:
-      POSTGRES_USER: "root"
-      POSTGRES_PASSWORD: "root"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
       POSTGRES_DB: "rb2025"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/ddl.sql

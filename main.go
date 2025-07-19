@@ -11,6 +11,7 @@ import (
 	"payments-rinha/handler"
 	"payments-rinha/postgres"
 	"payments-rinha/processor"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -40,8 +41,16 @@ func main() {
 	defer stop()
 
 	dbHost := readEnv("DB_HOST", "localhost")
+	dbPort, err := strconv.Atoi(readEnv("DB_PORT", "5432"))
+	if err != nil {
+		log.Fatal("Invalid database port!")
+		return
+	}
+	dbUser := readEnv("DB_USER", "postgres")
+	dbPass := readEnv("DB_PASSWORD", "postgres")
+	dbName := readEnv("DB_NAME", "rb2025")
 
-	db, err := postgres.NewDB(dbHost, 5432, "root", "root", "rb2025")
+	db, err := postgres.NewDB(dbHost, dbPort, dbUser, dbPass, dbName)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %v", err)
 	}
@@ -53,9 +62,9 @@ func main() {
 
 	pr := processor.NewProcessor(defaultUrl, fallbackUrl)
 
-	consumerGroupName := readEnv("CONSUMER_GROUP_NAME", "rinha2025")
+	consumerName := readEnv("CONSUMER_NAME", "rinha2025")
 
-	rdb := broker.NewBrokerPool(redisUri, "admin", db, pr, consumerGroupName)
+	rdb := broker.NewBrokerPool(redisUri, "admin", db, pr, consumerName)
 
 	rdb.StartListener(ctx, &wg)
 
